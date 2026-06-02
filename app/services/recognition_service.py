@@ -25,17 +25,19 @@ class RecognitionService:
         content = await file.read()
         if len(content) > settings.max_image_mb * 1024 * 1024:
             raise BadRequestError("image is too large")
-        suffix = Path(file.filename or "image.png").suffix or ".png"
+        original_filename = file.filename or "image.png"
+        normalized_scene = self._normalize_scene_by_filename(original_filename, scene)
+        suffix = Path(original_filename).suffix or ".png"
         image_path = self.temp_dir / f"{uuid.uuid4().hex}{suffix}"
         image_path.write_bytes(content)
         try:
             ocr = self.ocr.recognize(image_path)
-            result = self.extractor.extract(ocr.raw_text, platform=platform, scene=scene)
+            result = self.extractor.extract(ocr.raw_text, platform=platform, scene=normalized_scene)
             return RecognitionResponse(
                 requestId=uuid.uuid4().hex,
                 engine=ocr.engine,
                 platform=platform,
-                scene=scene,
+                scene=normalized_scene,
                 rawText=ocr.raw_text,
                 result=result,
                 warnings=[],
@@ -46,3 +48,8 @@ class RecognitionService:
                 image_path.unlink(missing_ok=True)
             except Exception:
                 pass
+
+    def _normalize_scene_by_filename(self, filename: str, scene: str) -> str:
+        if "账号页面" in filename or "账号页" in filename:
+            return "ACCOUNT_OVERVIEW"
+        return scene
