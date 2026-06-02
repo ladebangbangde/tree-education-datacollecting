@@ -30,7 +30,7 @@ class RecognitionService:
         image_path.write_bytes(content)
         try:
             ocr = self.ocr.recognize(image_path)
-            result = self.extractor.extract(ocr.raw_text)
+            result = self.extractor.extract(ocr.raw_text, platform=platform, scene=scene)
             return RecognitionResponse(
                 requestId=uuid.uuid4().hex,
                 engine=ocr.engine,
