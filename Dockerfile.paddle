@@ -11,7 +11,7 @@ RUN set -eux; \
     sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources; \
     sed -i 's|http://deb.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
     apt-get update; \
-    apt-get install -y --no-install-recommends libgl1 libglib2.0-0; \
+    apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1; \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements-paddle.txt /app/requirements-paddle.txt
