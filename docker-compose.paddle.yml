@@ -1,0 +1,14 @@
+services:
+  image-recognition:
+    build:
+      context: .
+      dockerfile: Dockerfile.paddle
+    container_name: tree-education-datacollecting-paddle
+    ports:
+      - "18083:18083"
+    env_file:
+      - .env
+    environment:
+      OCR_ENGINE: paddle
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-recognition-token}
+    restart: unless-stopped
