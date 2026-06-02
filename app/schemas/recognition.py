@@ -9,11 +9,18 @@ class Metrics(BaseModel):
     favoriteCount: int | None = None
     shareCount: int | None = None
     followerCount: int | None = None
+    followerGain: int | None = None
+    completionRate: str | None = None
+    interactionRate: str | None = None
+    averageWatchSeconds: float | None = None
+    profileVisitCount: int | None = None
 
 
 class RecognitionResult(BaseModel):
     accountName: str | None = None
+    douyinId: str | None = None
     contentTitle: str | None = None
+    candidateTitles: list[str] = Field(default_factory=list)
     metrics: Metrics = Field(default_factory=Metrics)
     confidence: float = 0.0
 
