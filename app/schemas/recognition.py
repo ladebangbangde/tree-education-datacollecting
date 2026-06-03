@@ -18,7 +18,9 @@ class Metrics(BaseModel):
 
 class RecognitionResult(BaseModel):
     accountName: str | None = None
+    accountId: str | None = None
     douyinId: str | None = None
+    wechatChannelId: str | None = None
     contentTitle: str | None = None
     candidateTitles: list[str] = Field(default_factory=list)
     metrics: Metrics = Field(default_factory=Metrics)
