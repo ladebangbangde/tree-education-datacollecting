@@ -12,15 +12,19 @@ class SocialMetricsExtractor:
     TITLE_NOISE = [
         "关注", "粉丝", "点赞", "评论", "收藏", "分享", "转发", "播放", "浏览", "观看", "获赞", "阅读",
         "首页", "推荐", "朋友", "消息", "扫一扫", "直播", "广告", "打开", "复制", "搜索", "音乐", "拍同款",
-        "创作者服务中心", "数据中心", "作品数据", "查看更多", "暂无", "加载", "发布", "私信"
+        "创作者服务中心", "数据中心", "作品数据", "查看更多", "暂无", "加载", "发布", "私信", "添加朋友", "编辑主页"
+    ]
+
+    ACCOUNT_PAGE_HINTS = [
+        "抖音号", "视频号", "微信号", "小红书号", "获赞", "互关", "粉丝", "编辑主页", "编辑资料", "添加朋友", "创作者中心", "我的钱包"
     ]
 
     def extract(self, text: str, platform: str | None = None, scene: str | None = None) -> RecognitionResult:
         clean = self._normalize_text(text or "")
         lines = self._lines(clean)
         scene_upper = (scene or "").upper()
-        if scene_upper == "ACCOUNT_OVERVIEW":
-            return self._extract_account_overview(clean, lines)
+        if scene_upper == "ACCOUNT_OVERVIEW" or self._looks_like_account_page(clean, lines):
+            return self._extract_account_overview(clean, lines, platform=platform)
         metrics = Metrics(
             viewCount=self._find_number(clean, ["播放", "浏览", "阅读", "观看", "展现", "曝光"]),
             likeCount=self._find_number(clean, ["点赞", "获赞", "赞"]),
@@ -37,38 +41,52 @@ class SocialMetricsExtractor:
         candidates = self._title_candidates(lines, platform=platform)
         title = candidates[0] if candidates else None
         account_name = self._extract_account_name(lines)
-        douyin_id = self._extract_douyin_id(clean)
+        account_id = self._extract_account_id(clean, platform=platform)
         filled = sum(1 for v in metrics.model_dump().values() if v is not None)
-        confidence = min(0.96, 0.35 + filled * 0.055 + (0.20 if title else 0) + (0.08 if account_name else 0) + (0.05 if douyin_id else 0))
+        confidence = min(0.96, 0.35 + filled * 0.055 + (0.20 if title else 0) + (0.08 if account_name else 0) + (0.05 if account_id else 0))
         return RecognitionResult(
             accountName=account_name,
-            douyinId=douyin_id,
+            accountId=account_id,
+            douyinId=account_id if (platform or "").upper() == "DOUYIN" else None,
+            wechatChannelId=account_id if (platform or "").upper() == "WECHAT_CHANNEL" else None,
             contentTitle=title,
             candidateTitles=candidates[:5],
             metrics=metrics,
             confidence=confidence,
         )
 
-    def _extract_account_overview(self, clean: str, lines: list[str]) -> RecognitionResult:
-        douyin_id = self._extract_douyin_id(clean)
-        account_name = self._extract_account_name_from_account_page(lines, douyin_id)
-        metrics = Metrics(
-            likeCount=self._find_number(clean, ["获赞", "点赞", "赞"]),
-            followerCount=self._find_number(clean, ["粉丝"]),
-        )
-        confidence = min(0.96, 0.45 + (0.25 if douyin_id else 0) + (0.20 if account_name else 0) + (0.05 if metrics.likeCount is not None else 0) + (0.05 if metrics.followerCount is not None else 0))
+    def _looks_like_account_page(self, clean: str, lines: list[str]) -> bool:
+        if not clean:
+            return False
+        hit_count = sum(1 for word in self.ACCOUNT_PAGE_HINTS if word in clean)
+        if "抖音号" in clean or "视频号" in clean or "微信号" in clean or "小红书号" in clean:
+            return True
+        if hit_count >= 2 and any(word in clean for word in ["粉丝", "关注", "获赞", "互关"]):
+            return True
+        first_text = "\n".join(lines[:16])
+        return hit_count >= 2 and any(word in first_text for word in ["编辑主页", "编辑资料", "添加朋友", "我的订单", "创作者中心"])
+
+    def _extract_account_overview(self, clean: str, lines: list[str], platform: str | None = None) -> RecognitionResult:
+        platform_upper = (platform or "").upper()
+        account_id = self._extract_account_id(clean, platform=platform)
+        account_name = self._extract_account_name_from_account_page(lines, account_id)
+        confidence = min(0.96, 0.35 + (0.35 if account_id else 0) + (0.25 if account_name else 0))
         return RecognitionResult(
             accountName=account_name,
-            douyinId=douyin_id,
+            accountId=account_id,
+            douyinId=account_id if platform_upper == "DOUYIN" else None,
+            wechatChannelId=account_id if platform_upper == "WECHAT_CHANNEL" else None,
             contentTitle=None,
             candidateTitles=[],
-            metrics=metrics,
+            metrics=Metrics(),
             confidence=confidence,
         )
 
     def _normalize_text(self, text: str) -> str:
         value = text.replace("｜", "|").replace("：", ":").replace("，", ",")
         value = value.replace("％", "%").replace("Ｗ", "W").replace("ｗ", "w")
+        value = value.replace("抖音 号", "抖音号").replace("抖 音号", "抖音号").replace("抖音帳", "抖音号")
+        value = value.replace("视频 号", "视频号").replace("视 频号", "视频号")
         return value
 
     def _find_number(self, text: str, labels: list[str]) -> int | None:
@@ -124,6 +142,25 @@ class SocialMetricsExtractor:
         except ValueError:
             return None
 
+    def _extract_account_id(self, text: str, platform: str | None = None) -> str | None:
+        patterns = [
+            r"抖音号\s*[:：]?\s*([A-Za-z0-9_.\-]{4,40})",
+            r"抖音\s*ID\s*[:：]?\s*([A-Za-z0-9_.\-]{4,40})",
+            r"Douyin\s*ID\s*[:：]?\s*([A-Za-z0-9_.\-]{4,40})",
+            r"视频号\s*[:：]?\s*([A-Za-z0-9_.\-]{4,60})",
+            r"微信号\s*[:：]?\s*([A-Za-z0-9_.\-]{4,60})",
+            r"小红书号\s*[:：]?\s*([A-Za-z0-9_.\-]{4,60})",
+            r"ID\s*[:：]?\s*([A-Za-z0-9_.\-]{6,60})",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                return m.group(1).strip(" ._-")[:60]
+        return None
+
+    def _extract_douyin_id(self, text: str) -> str | None:
+        return self._extract_account_id(text, platform="DOUYIN")
+
     def _extract_account_name(self, lines: list[str]) -> str | None:
         labels = ["账号", "昵称", "作者", "账号名称", "达人名称", "用户"]
         for line in lines:
@@ -133,58 +170,48 @@ class SocialMetricsExtractor:
                     value = self._clean_name(value)
                     if value:
                         return value[:80]
-        for line in lines:
-            value = self._clean_name(line)
-            if value and value.startswith("@"):
-                return value.strip("@")[:80]
         return None
 
-    def _extract_account_name_from_account_page(self, lines: list[str], douyin_id: str | None = None) -> str | None:
+    def _extract_account_name_from_account_page(self, lines: list[str], account_id: str | None = None) -> str | None:
         for idx, line in enumerate(lines):
-            if "抖音号" in line:
-                same_line = re.split(r"抖音号", line, maxsplit=1)[0].strip(" :|@")
-                candidate = self._clean_account_page_name(same_line, douyin_id)
+            if any(label in line for label in ["抖音号", "视频号", "微信号", "小红书号"]):
+                same_line = re.split(r"抖音号|视频号|微信号|小红书号", line, maxsplit=1)[0].strip(" :|@")
+                candidate = self._clean_account_page_name(same_line, account_id)
                 if candidate:
                     return candidate
-                for back in range(idx - 1, max(-1, idx - 5), -1):
-                    candidate = self._clean_account_page_name(lines[back], douyin_id)
+                for back in range(idx - 1, max(-1, idx - 6), -1):
+                    candidate = self._clean_account_page_name(lines[back], account_id)
                     if candidate:
                         return candidate
-        for line in lines[:10]:
-            candidate = self._clean_account_page_name(line, douyin_id)
+        for line in lines[:14]:
+            candidate = self._clean_account_page_name(line, account_id)
             if candidate:
                 return candidate
         return None
 
-    def _clean_account_page_name(self, value: str | None, douyin_id: str | None = None) -> str | None:
+    def _clean_account_page_name(self, value: str | None, account_id: str | None = None) -> str | None:
         if not value:
             return None
         text = re.sub(r"\s+", " ", value).strip(" :|@")
-        text = re.sub(r"^账号\s*", "", text).strip(" :|@")
-        text = re.sub(r"抖音号.*$", "", text).strip(" :|@")
+        text = re.sub(r"^(账号|昵称|作者|用户)\s*", "", text).strip(" :|@")
+        text = re.sub(r"(抖音号|视频号|微信号|小红书号).*$", "", text).strip(" :|@")
         text = text.replace("已关注", "").replace("关注", "").strip(" :|@")
-        if douyin_id and douyin_id in text:
+        if account_id and account_id in text:
             return None
         if len(text) < 2 or len(text) > 40:
             return None
         if re.fullmatch(r"[0-9A-Za-z_.\-]+", text):
             return None
-        if any(word in text for word in ["作品", "动态", "喜欢", "收藏", "获赞", "粉丝", "关注", "编辑资料", "添加朋友", "抖音商城", "商品橱窗", "企业服务中心", "地址", "IP属地"]):
+        noise_words = [
+            "中国联通", "中国移动", "中国电信", "添加朋友", "新访客", "搜索", "首页", "消息", "朋友", "我的订单", "观看历史", "创作者中心",
+            "我的钱包", "全部功能", "作品", "日常", "收藏", "喜欢", "获赞", "互关", "粉丝", "关注", "编辑主页", "编辑资料",
+            "添加性别", "标签", "私密作品", "抖音商城", "商品橱窗", "企业服务中心", "地址", "IP属地", "去发布"
+        ]
+        if any(word in text for word in noise_words):
+            return None
+        if re.search(r"^[0-9]+$", text):
             return None
         return text
-
-    def _extract_douyin_id(self, text: str) -> str | None:
-        patterns = [
-            r"抖音号\s*[:：]?\s*([A-Za-z0-9_.\-]{4,40})",
-            r"抖音\s*ID\s*[:：]?\s*([A-Za-z0-9_.\-]{4,40})",
-            r"Douyin\s*ID\s*[:：]?\s*([A-Za-z0-9_.\-]{4,40})",
-            r"ID\s*[:：]?\s*([A-Za-z0-9_.\-]{6,40})",
-        ]
-        for pattern in patterns:
-            m = re.search(pattern, text, re.IGNORECASE)
-            if m:
-                return m.group(1).strip(" ._-")[:40]
-        return None
 
     def _title_candidates(self, lines: list[str], platform: str | None = None) -> list[str]:
         explicit = self._explicit_titles(lines)
