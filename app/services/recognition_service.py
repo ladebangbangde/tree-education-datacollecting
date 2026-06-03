@@ -1,5 +1,4 @@
 import json
-import logging
 import time
 import uuid
 from pathlib import Path
@@ -11,8 +10,6 @@ from app.core.errors import BadRequestError
 from app.schemas.recognition import RecognitionResponse
 from app.services.ocr_engine import OcrEngine
 from app.services.social_metrics_extractor import SocialMetricsExtractor
-
-logger = logging.getLogger("tree_education_datacollecting.recognition")
 
 
 class RecognitionService:
@@ -35,33 +32,35 @@ class RecognitionService:
         image_path = self.temp_dir / f"{uuid.uuid4().hex}{suffix}"
         image_path.write_bytes(content)
         request_id = uuid.uuid4().hex
-        logger.info(
-            "recognition_start requestId=%s filename=%s contentType=%s size=%s platform=%s scene=%s normalizedScene=%s engine=%s",
-            request_id,
-            original_filename,
-            file.content_type,
-            len(content),
-            platform,
-            scene,
-            normalized_scene,
-            settings.ocr_engine,
+        self._debug_print(
+            "RECOGNITION START",
+            {
+                "requestId": request_id,
+                "filename": original_filename,
+                "contentType": file.content_type,
+                "size": len(content),
+                "platform": platform,
+                "scene": scene,
+                "normalizedScene": normalized_scene,
+                "ocrEngineSetting": settings.ocr_engine,
+                "tempPath": str(image_path),
+            },
         )
         try:
             ocr = self.ocr.recognize(image_path)
-            logger.info(
-                "ocr_raw_text requestId=%s filename=%s engine=%s rawTextLength=%s\n===== OCR RAW TEXT BEGIN =====\n%s\n===== OCR RAW TEXT END =====",
-                request_id,
-                original_filename,
-                ocr.engine,
-                len(ocr.raw_text or ""),
-                ocr.raw_text or "",
-            )
+            print("\n===== OCR RAW TEXT BEGIN =====", flush=True)
+            print(ocr.raw_text or "", flush=True)
+            print("===== OCR RAW TEXT END =====\n", flush=True)
             result = self.extractor.extract(ocr.raw_text, platform=platform, scene=normalized_scene)
-            logger.info(
-                "ocr_parsed_result requestId=%s filename=%s result=%s",
-                request_id,
-                original_filename,
-                json.dumps(result.model_dump(), ensure_ascii=False),
+            self._debug_print(
+                "RECOGNITION PARSED RESULT",
+                {
+                    "requestId": request_id,
+                    "filename": original_filename,
+                    "engine": ocr.engine,
+                    "rawTextLength": len(ocr.raw_text or ""),
+                    "result": result.model_dump(),
+                },
             )
             warnings = []
             if not (ocr.raw_text or "").strip():
@@ -76,6 +75,17 @@ class RecognitionService:
                 warnings=warnings,
                 elapsedMs=int((time.time() - start) * 1000),
             )
+        except Exception as exc:
+            self._debug_print(
+                "RECOGNITION ERROR",
+                {
+                    "requestId": request_id,
+                    "filename": original_filename,
+                    "errorType": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
         finally:
             try:
                 image_path.unlink(missing_ok=True)
@@ -86,3 +96,8 @@ class RecognitionService:
         if any(keyword in filename for keyword in ["账号页面", "账号页", "账号封面", "主页", "首页资料", "个人页", "个人主页"]):
             return "ACCOUNT_OVERVIEW"
         return scene
+
+    def _debug_print(self, title: str, payload: dict) -> None:
+        print(f"\n===== {title} =====", flush=True)
+        print(json.dumps(payload, ensure_ascii=False, default=str, indent=2), flush=True)
+        print(f"===== {title} END =====\n", flush=True)
