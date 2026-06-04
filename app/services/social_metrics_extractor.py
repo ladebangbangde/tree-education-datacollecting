@@ -12,32 +12,41 @@ class SocialMetricsExtractor:
     TITLE_NOISE = [
         "关注", "粉丝", "点赞", "评论", "收藏", "分享", "转发", "播放", "浏览", "观看", "获赞", "阅读",
         "首页", "推荐", "朋友", "消息", "扫一扫", "直播", "广告", "打开", "复制", "搜索", "音乐", "拍同款",
-        "创作者服务中心", "数据中心", "作品数据", "查看更多", "暂无", "加载", "发布", "私信", "添加朋友", "编辑主页"
+        "创作者服务中心", "数据中心", "作品数据", "查看更多", "暂无", "加载", "发布", "私信", "添加朋友", "编辑主页",
+        "作品数据详情", "总览", "流量分析", "观众分析", "切换作品", "设置观测>"
     ]
 
     ACCOUNT_PAGE_HINTS = [
         "抖音号", "视频号", "微信号", "小红书号", "获赞", "互关", "粉丝", "编辑主页", "编辑资料", "添加朋友", "创作者中心", "我的钱包"
     ]
 
+    NUMBER_RE = re.compile(r"[+\-]?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:%|万|千|w|W|k|K)?")
+
     def extract(self, text: str, platform: str | None = None, scene: str | None = None) -> RecognitionResult:
         clean = self._normalize_text(text or "")
         lines = self._lines(clean)
+        platform_upper = (platform or "").upper()
         scene_upper = (scene or "").upper()
         if scene_upper == "ACCOUNT_OVERVIEW" or self._looks_like_account_page(clean, lines):
             return self._extract_account_overview(clean, lines, platform=platform)
-        metrics = Metrics(
-            viewCount=self._find_number(clean, ["播放", "浏览", "阅读", "观看", "展现", "曝光"]),
-            likeCount=self._find_number(clean, ["点赞", "获赞", "赞"]),
-            commentCount=self._find_number(clean, ["评论"]),
-            favoriteCount=self._find_number(clean, ["收藏"]),
-            shareCount=self._find_number(clean, ["分享", "转发"]),
-            followerCount=self._find_number(clean, ["粉丝"]),
-            followerGain=self._find_number(clean, ["涨粉", "新增粉丝", "转粉", "粉丝增量", "净增粉丝"]),
-            profileVisitCount=self._find_number(clean, ["主页访问", "主页访客", "主页浏览", "主页访问量"]),
-            completionRate=self._find_percent(clean, ["完播率", "播放完成率", "看完率"]),
-            interactionRate=self._find_percent(clean, ["互动率", "互动转化率"]),
-            averageWatchSeconds=self._find_seconds(clean, ["平均播放时长", "平均观看时长", "人均观看时长", "平均看播时长"]),
-        )
+
+        if platform_upper == "DOUYIN" and self._looks_like_douyin_data_page(clean, lines):
+            metrics = self._extract_douyin_data_page_metrics(clean, lines)
+        else:
+            metrics = Metrics(
+                viewCount=self._find_number(clean, ["播放", "浏览", "阅读", "观看", "展现", "曝光"]),
+                likeCount=self._find_number(clean, ["点赞", "获赞", "赞"]),
+                commentCount=self._find_number(clean, ["评论"]),
+                favoriteCount=self._find_number(clean, ["收藏"]),
+                shareCount=self._find_number(clean, ["分享", "转发"]),
+                followerCount=self._find_number(clean, ["粉丝"]),
+                followerGain=self._find_number(clean, ["涨粉", "新增粉丝", "转粉", "粉丝增量", "净增粉丝"]),
+                profileVisitCount=self._find_number(clean, ["主页访问", "主页访客", "主页浏览", "主页访问量"]),
+                completionRate=self._find_percent(clean, ["完播率", "播放完成率", "看完率"]),
+                interactionRate=self._find_percent(clean, ["互动率", "互动转化率"]),
+                averageWatchSeconds=self._find_seconds(clean, ["平均播放时长", "平均观看时长", "人均观看时长", "平均看播时长"]),
+            )
+
         candidates = self._title_candidates(lines, platform=platform)
         title = candidates[0] if candidates else None
         account_name = self._extract_account_name(lines)
@@ -47,13 +56,101 @@ class SocialMetricsExtractor:
         return RecognitionResult(
             accountName=account_name,
             accountId=account_id,
-            douyinId=account_id if (platform or "").upper() == "DOUYIN" else None,
-            wechatChannelId=account_id if (platform or "").upper() == "WECHAT_CHANNEL" else None,
+            douyinId=account_id if platform_upper == "DOUYIN" else None,
+            wechatChannelId=account_id if platform_upper == "WECHAT_CHANNEL" else None,
             contentTitle=title,
             candidateTitles=candidates[:5],
             metrics=metrics,
             confidence=confidence,
         )
+
+    def _looks_like_douyin_data_page(self, clean: str, lines: list[str]) -> bool:
+        return "作品数据详情" in clean and ("总览" in clean or "流量分析" in clean or "观众分析" in clean)
+
+    def _extract_douyin_data_page_metrics(self, clean: str, lines: list[str]) -> Metrics:
+        metrics = Metrics()
+
+        primary_values = self._values_after_label_sequence(lines, ["播放量", "点赞量", "评论量"], 3)
+        if len(primary_values) >= 1:
+            metrics.viewCount = self._parse_number(primary_values[0])
+        else:
+            metrics.viewCount = self._find_inline_number(clean, [r"播放量\s*([0-9][0-9,]*(?:\.\d+)?)"])
+        if len(primary_values) >= 2:
+            metrics.likeCount = self._parse_number(primary_values[1])
+        if len(primary_values) >= 3:
+            metrics.commentCount = self._parse_number(primary_values[2])
+
+        secondary_values = self._values_after_label_sequence(lines, ["分享量", "收藏量", "划走率"], 3)
+        if len(secondary_values) >= 1:
+            metrics.shareCount = self._parse_number(secondary_values[0])
+        if len(secondary_values) >= 2 and not self._looks_percent(secondary_values[1]):
+            metrics.favoriteCount = self._parse_number(secondary_values[1])
+        if len(secondary_values) >= 3 and not self._looks_percent(secondary_values[2]):
+            metrics.favoriteCount = self._parse_number(secondary_values[1])
+
+        fan_values = self._values_after_label_sequence(lines, ["涨粉量", "脱粉量", "粉丝播放占比"], 3)
+        if fan_values:
+            metrics.followerGain = self._parse_number(fan_values[0])
+
+        completion = self._find_percent(clean, ["完播率", "播放完成率", "看完率"])
+        if completion:
+            metrics.completionRate = completion
+        interaction = self._find_percent(clean, ["互动率", "评论率", "分享率"])
+        if interaction:
+            metrics.interactionRate = interaction
+        average_watch = self._find_seconds(clean, ["平均播放时长", "平均观看时长"])
+        if average_watch is not None:
+            metrics.averageWatchSeconds = average_watch
+
+        return metrics
+
+    def _values_after_label_sequence(self, lines: list[str], labels: list[str], desired: int) -> list[str]:
+        start = self._index_of_sequence(lines, labels)
+        if start < 0:
+            return []
+        values: list[str] = []
+        for line in lines[start + len(labels):]:
+            if self._is_label_like(line) and values:
+                break
+            number = self._first_number_token(line)
+            if number is not None:
+                values.append(number)
+            if len(values) >= desired:
+                break
+        return values
+
+    def _index_of_sequence(self, lines: list[str], labels: list[str]) -> int:
+        normalized_labels = [self._normalize_key(v) for v in labels]
+        for i in range(0, len(lines) - len(labels) + 1):
+            if [self._normalize_key(v) for v in lines[i:i + len(labels)]] == normalized_labels:
+                return i
+        return -1
+
+    def _is_label_like(self, value: str) -> bool:
+        if not value or self._first_number_token(value) == value.strip():
+            return False
+        labels = [
+            "播放量", "点赞量", "评论量", "分享量", "收藏量", "划走率", "文案展开率", "平均浏览图片数",
+            "涨粉量", "脱粉量", "粉丝播放占比", "封面点击率", "文案完读率", "评论进入率",
+            "新增累计", "每小时", "每天", "设置观测>", "观看趋势", "留存分析"
+        ]
+        return any(label in value for label in labels)
+
+    def _first_number_token(self, value: str) -> str | None:
+        if not value:
+            return None
+        m = self.NUMBER_RE.search(value.replace("％", "%"))
+        return m.group(0).replace(" ", "") if m else None
+
+    def _find_inline_number(self, text: str, patterns: list[str]) -> int | None:
+        for pattern in patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                return self._parse_number(m.group(1))
+        return None
+
+    def _looks_percent(self, value: str | None) -> bool:
+        return bool(value and "%" in value)
 
     def _looks_like_account_page(self, clean: str, lines: list[str]) -> bool:
         if not clean:
@@ -128,8 +225,12 @@ class SocialMetricsExtractor:
                         return None
         return None
 
-    def _parse_number(self, value: str) -> int | None:
-        s = value.strip().replace(" ", "").lower()
+    def _parse_number(self, value: str | None) -> int | None:
+        if value is None:
+            return None
+        s = value.strip().replace(" ", "").replace(",", "").lower()
+        if s.endswith("%"):
+            return None
         multiplier = 1
         if s.endswith("万") or s.endswith("w"):
             multiplier = 10000
@@ -157,9 +258,6 @@ class SocialMetricsExtractor:
             if m:
                 return m.group(1).strip(" ._-")[:60]
         return None
-
-    def _extract_douyin_id(self, text: str) -> str | None:
-        return self._extract_account_id(text, platform="DOUYIN")
 
     def _extract_account_name(self, lines: list[str]) -> str | None:
         labels = ["账号", "昵称", "作者", "账号名称", "达人名称", "用户"]
@@ -325,3 +423,6 @@ class SocialMetricsExtractor:
             if value:
                 result.append(value)
         return result
+
+    def _normalize_key(self, value: str) -> str:
+        return re.sub(r"[\s:_：/\-+>√]", "", value or "")
