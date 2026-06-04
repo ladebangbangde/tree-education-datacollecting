@@ -24,6 +24,7 @@ class RecognitionResult(BaseModel):
     contentTitle: str | None = None
     candidateTitles: list[str] = Field(default_factory=list)
     metrics: Metrics = Field(default_factory=Metrics)
+    keyValueMetrics: dict[str, Any] = Field(default_factory=dict)
     confidence: float = 0.0
 
 
