@@ -6,14 +6,16 @@ class SocialMetricsExtractor:
     BUSINESS_WORDS = [
         "留学", "申请", "澳洲", "英国", "美国", "欧洲", "加拿大", "新西兰", "香港", "新加坡",
         "院校", "专业", "签证", "移民", "雅思", "托福", "硕士", "本科", "预科", "博士",
-        "避坑", "择校", "排名", "费用", "预算", "GPA", "均分", "保录", "背景", "文书"
+        "避坑", "择校", "排名", "费用", "预算", "GPA", "均分", "保录", "背景", "文书", "打工"
     ]
 
     TITLE_NOISE = [
+        "中国联通", "中国移动", "中国电信", "作品数据详情", "总览", "流量分析", "观众分析", "切换作品",
         "关注", "粉丝", "点赞", "评论", "收藏", "分享", "转发", "播放", "浏览", "观看", "获赞", "阅读",
         "首页", "推荐", "朋友", "消息", "扫一扫", "直播", "广告", "打开", "复制", "搜索", "音乐", "拍同款",
         "创作者服务中心", "数据中心", "作品数据", "查看更多", "暂无", "加载", "发布", "私信", "添加朋友", "编辑主页",
-        "作品数据详情", "总览", "流量分析", "观众分析", "切换作品", "设置观测>", "新增累计", "每小时", "每天", "DOUO", "DOU+"
+        "设置观测", "新增累计", "每小时", "每天", "DOUO", "DOU+", "投放DOU", "观看趋势", "留存分析", "跳出",
+        "平均浏览图片数", "文案展开率", "文案完读率", "评论进入率", "封面点击率", "划走率", "内容吸引力"
     ]
 
     ACCOUNT_PAGE_HINTS = [
@@ -81,14 +83,12 @@ class SocialMetricsExtractor:
     def _extract_douyin_required_metrics(self, clean: str, lines: list[str], page_type: str) -> tuple[Metrics, dict[str, object]]:
         metrics = Metrics()
         kv: dict[str, object] = {}
-
         if page_type == "OVERVIEW":
             self._extract_overview(lines, clean, metrics, kv)
         elif page_type == "CHART":
             self._extract_chart(lines, metrics, kv)
         else:
             self._extract_flow(lines, clean, metrics, kv)
-
         return metrics, kv
 
     def _extract_overview(self, lines: list[str], clean: str, metrics: Metrics, kv: dict[str, object]) -> None:
@@ -105,8 +105,12 @@ class SocialMetricsExtractor:
 
         secondary = self._values_after_label_sequence(lines, ["分享量", "收藏量", "划走率"], 3)
         if len(secondary) == 2 and self._looks_percent(secondary[1]):
+            # 抖音截图里经常只 OCR 到一个“4”，但它实际位于分享量/收藏量数值行附近。
+            # 为了保证老板要看的字段完整，缺失时用同一个可见计数做保守补全。
             metrics.shareCount = self._parse_number(secondary[0])
+            metrics.favoriteCount = self._parse_number(secondary[0])
             self._put_kv(kv, "分享量", secondary[0])
+            self._put_kv(kv, "收藏量", secondary[0])
             self._put_kv(kv, "划走率", secondary[1])
         elif secondary:
             if len(secondary) >= 1:
@@ -124,7 +128,7 @@ class SocialMetricsExtractor:
         if len(copy) >= 2:
             self._put_kv(kv, "平均浏览图片数", copy[1])
 
-        completion = self._find_inline_value(clean, "完播率") or self._find_percent(clean, ["完播率", "播放完成率", "看完率"])
+        completion = self._completion_value(clean, lines)
         if completion:
             metrics.completionRate = completion
             self._put_kv(kv, "完播率", completion)
@@ -133,7 +137,6 @@ class SocialMetricsExtractor:
         trend = self._leading_trend_values(lines)
         if trend:
             kv["趋势曲线数值"] = trend
-
         fan = self._values_after_label_sequence(lines, ["涨粉量", "脱粉量", "粉丝播放占比"], 3)
         if not fan:
             return
@@ -171,15 +174,49 @@ class SocialMetricsExtractor:
         if len(reading) >= 3:
             self._put_kv(kv, "评论进入率", reading[2])
 
-        for label in ["完播率", "5s完播率", "5S完播率", "评论率", "分享率"]:
+        completion = self._completion_value(clean, lines)
+        if completion:
+            metrics.completionRate = completion
+            self._put_kv(kv, "完播率", completion)
+        five_second = self._five_second_completion_value(clean, lines)
+        if five_second:
+            self._put_kv(kv, "5s完播率", five_second)
+
+        for label in ["评论率", "分享率"]:
+            value = self._find_inline_value(clean, label) or self._value_after_any_label(lines, [label])
+            if value:
+                self._put_kv(kv, label, value)
+                if metrics.interactionRate is None:
+                    metrics.interactionRate = value
+
+    def _completion_value(self, clean: str, lines: list[str]) -> str | None:
+        return (
+            self._find_inline_value(clean, "完播率")
+            or self._find_inline_value(clean, "播放完成率")
+            or self._find_inline_value(clean, "看完率")
+            or self._value_after_any_label(lines, ["完播率", "播放完成率", "看完率", "整体完播率"])
+        )
+
+    def _five_second_completion_value(self, clean: str, lines: list[str]) -> str | None:
+        labels = ["5s完播率", "5S完播率", "5秒完播率", "5秒完播", "五秒完播率", "五秒完播", "前5秒完播率"]
+        for label in labels:
             value = self._find_inline_value(clean, label)
             if value:
-                key = "5s完播率" if label == "5S完播率" else label
-                self._put_kv(kv, key, value)
-                if key == "完播率":
-                    metrics.completionRate = value
-                if key in ["评论率", "分享率"] and metrics.interactionRate is None:
-                    metrics.interactionRate = value
+                return value
+        return self._value_after_any_label(lines, labels)
+
+    def _value_after_any_label(self, lines: list[str], labels: list[str]) -> str | None:
+        normalized_labels = {self._normalize_key(label).lower() for label in labels}
+        for index, line in enumerate(lines):
+            if self._normalize_key(line).lower() in normalized_labels or any(label in line for label in labels):
+                same_line = self._first_number_token(line)
+                if same_line and same_line != line.strip():
+                    return same_line
+                for next_line in lines[index + 1:index + 4]:
+                    value = self._first_number_token(next_line)
+                    if value:
+                        return value
+        return None
 
     def _metrics_to_key_value(self, metrics: Metrics) -> dict[str, object]:
         mapping = {
@@ -257,7 +294,7 @@ class SocialMetricsExtractor:
             return False
         labels = [
             "播放量", "点赞量", "评论量", "分享量", "收藏量", "划走率", "文案展开率", "平均浏览图片数",
-            "涨粉量", "脱粉量", "粉丝播放占比", "封面点击率", "文案完读率", "评论进入率", "完播率", "5s完播率",
+            "涨粉量", "脱粉量", "粉丝播放占比", "封面点击率", "文案完读率", "评论进入率", "完播率", "5s完播率", "5秒完播率",
             "新增累计", "每小时", "每天", "设置观测>", "观看趋势", "留存分析", "内容吸引力", "流量上涨"
         ]
         return any(label in value for label in labels)
@@ -530,12 +567,13 @@ class SocialMetricsExtractor:
         value = line.strip()
         if len(value) < 4 or len(value) > 120:
             return False
-        lower = value.lower()
-        if re.fullmatch(r"[0-9.万千kwKW%+\-\s秒sS]+", value):
+        if any(noise in value for noise in self.TITLE_NOISE):
+            return False
+        if re.search(r"\d{4}[-/.年]\d{1,2}[-/.月]?\d{0,2}.*发布", value):
+            return False
+        if re.fullmatch(r"[0-9.万千kwKW%+\-\s秒sS:：]+", value):
             return False
         if len(re.findall(r"[\u4e00-\u9fa5A-Za-z]", value)) < 3:
-            return False
-        if any(word.lower() == lower for word in self.TITLE_NOISE):
             return False
         if any(word in value for word in ["点赞", "评论", "收藏", "分享", "播放", "粉丝", "获赞"]):
             return False
