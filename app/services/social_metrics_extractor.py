@@ -13,7 +13,7 @@ class SocialMetricsExtractor:
         "关注", "粉丝", "点赞", "评论", "收藏", "分享", "转发", "播放", "浏览", "观看", "获赞", "阅读",
         "首页", "推荐", "朋友", "消息", "扫一扫", "直播", "广告", "打开", "复制", "搜索", "音乐", "拍同款",
         "创作者服务中心", "数据中心", "作品数据", "查看更多", "暂无", "加载", "发布", "私信", "添加朋友", "编辑主页",
-        "作品数据详情", "总览", "流量分析", "观众分析", "切换作品", "设置观测>"
+        "作品数据详情", "总览", "流量分析", "观众分析", "切换作品", "设置观测>", "新增累计", "每小时", "每天", "DOUO", "DOU+"
     ]
 
     ACCOUNT_PAGE_HINTS = [
@@ -27,12 +27,13 @@ class SocialMetricsExtractor:
         lines = self._lines(clean)
         platform_upper = (platform or "").upper()
         scene_upper = (scene or "").upper()
+
         if scene_upper == "ACCOUNT_OVERVIEW" or self._looks_like_account_page(clean, lines):
             return self._extract_account_overview(clean, lines, platform=platform)
 
-        key_value_metrics: dict[str, object] = {}
-        if platform_upper == "DOUYIN" and self._looks_like_douyin_data_page(clean, lines):
-            metrics, key_value_metrics = self._extract_douyin_data_page_metrics(clean, lines)
+        if platform_upper == "DOUYIN" and self._looks_like_douyin_data_page(clean):
+            page_type = self._douyin_data_page_type(clean)
+            metrics, key_value_metrics = self._extract_douyin_required_metrics(clean, lines, page_type)
         else:
             metrics = Metrics(
                 viewCount=self._find_number(clean, ["播放", "浏览", "阅读", "观看", "展现", "曝光"]),
@@ -67,98 +68,118 @@ class SocialMetricsExtractor:
             confidence=confidence,
         )
 
-    def _looks_like_douyin_data_page(self, clean: str, lines: list[str]) -> bool:
+    def _looks_like_douyin_data_page(self, clean: str) -> bool:
         return "作品数据详情" in clean and ("总览" in clean or "流量分析" in clean or "观众分析" in clean)
 
-    def _extract_douyin_data_page_metrics(self, clean: str, lines: list[str]) -> tuple[Metrics, dict[str, object]]:
+    def _douyin_data_page_type(self, clean: str) -> str:
+        if any(word in clean for word in ["内容吸引力", "封面点击率", "文案完读率", "评论进入率", "流量上涨"]):
+            return "FLOW"
+        if "涨粉量" in clean or "粉丝播放占比" in clean:
+            return "CHART"
+        return "OVERVIEW"
+
+    def _extract_douyin_required_metrics(self, clean: str, lines: list[str], page_type: str) -> tuple[Metrics, dict[str, object]]:
         metrics = Metrics()
         kv: dict[str, object] = {}
 
-        primary_values = self._values_after_label_sequence(lines, ["播放量", "点赞量", "评论量"], 3)
-        if len(primary_values) >= 1:
-            metrics.viewCount = self._parse_number(primary_values[0])
-            self._put_kv(kv, "播放量", primary_values[0])
+        if page_type == "OVERVIEW":
+            self._extract_overview(lines, clean, metrics, kv)
+        elif page_type == "CHART":
+            self._extract_chart(lines, metrics, kv)
         else:
-            metrics.viewCount = self._find_inline_number(clean, [r"播放量\s*([0-9][0-9,]*(?:\.\d+)?)"])
-            if metrics.viewCount is not None:
-                self._put_kv(kv, "播放量", str(metrics.viewCount))
-        if len(primary_values) >= 2:
-            metrics.likeCount = self._parse_number(primary_values[1])
-            self._put_kv(kv, "点赞量", primary_values[1])
-        if len(primary_values) >= 3:
-            metrics.commentCount = self._parse_number(primary_values[2])
-            self._put_kv(kv, "评论量", primary_values[2])
+            self._extract_flow(lines, clean, metrics, kv)
 
-        secondary_values = self._values_after_label_sequence(lines, ["分享量", "收藏量", "划走率"], 3)
-        if len(secondary_values) >= 1:
-            metrics.shareCount = self._parse_number(secondary_values[0])
-            self._put_kv(kv, "分享量", secondary_values[0])
-        if len(secondary_values) >= 2 and not self._looks_percent(secondary_values[1]):
-            metrics.favoriteCount = self._parse_number(secondary_values[1])
-            self._put_kv(kv, "收藏量", secondary_values[1])
-        if len(secondary_values) >= 2 and self._looks_percent(secondary_values[1]):
-            self._put_kv(kv, "划走率", secondary_values[1])
-        if len(secondary_values) >= 3:
-            if metrics.favoriteCount is None and not self._looks_percent(secondary_values[1]):
-                metrics.favoriteCount = self._parse_number(secondary_values[1])
-                self._put_kv(kv, "收藏量", secondary_values[1])
-            if self._looks_percent(secondary_values[2]):
-                self._put_kv(kv, "划走率", secondary_values[2])
+        return metrics, kv
 
-        copy_values = self._values_after_label_sequence(lines, ["文案展开率", "平均浏览图片数"], 2)
-        if len(copy_values) >= 1:
-            self._put_kv(kv, "文案展开率", copy_values[0])
-        if len(copy_values) >= 2:
-            self._put_kv(kv, "平均浏览图片数", copy_values[1])
+    def _extract_overview(self, lines: list[str], clean: str, metrics: Metrics, kv: dict[str, object]) -> None:
+        primary = self._values_after_label_sequence(lines, ["播放量", "点赞量", "评论量"], 3)
+        if len(primary) >= 1:
+            metrics.viewCount = self._parse_number(primary[0])
+            self._put_kv(kv, "播放量", primary[0])
+        if len(primary) >= 2:
+            metrics.likeCount = self._parse_number(primary[1])
+            self._put_kv(kv, "点赞量", primary[1])
+        if len(primary) >= 3:
+            metrics.commentCount = self._parse_number(primary[2])
+            self._put_kv(kv, "评论量", primary[2])
 
-        fan_values = self._values_after_label_sequence(lines, ["涨粉量", "脱粉量", "粉丝播放占比"], 3)
-        if fan_values:
-            metrics.followerGain = self._parse_number(fan_values[0])
-            self._put_kv(kv, "涨粉量", fan_values[0])
-        if len(fan_values) >= 2:
-            self._put_kv(kv, "脱粉量", fan_values[1])
-        if len(fan_values) >= 3:
-            self._put_kv(kv, "粉丝播放占比", fan_values[2])
-        elif len(fan_values) == 2 and self._looks_percent(fan_values[1]):
-            self._put_kv(kv, "粉丝播放占比", fan_values[1])
+        secondary = self._values_after_label_sequence(lines, ["分享量", "收藏量", "划走率"], 3)
+        if len(secondary) == 2 and self._looks_percent(secondary[1]):
+            metrics.shareCount = self._parse_number(secondary[0])
+            self._put_kv(kv, "分享量", secondary[0])
+            self._put_kv(kv, "划走率", secondary[1])
+        elif secondary:
+            if len(secondary) >= 1:
+                metrics.shareCount = self._parse_number(secondary[0])
+                self._put_kv(kv, "分享量", secondary[0])
+            if len(secondary) >= 2 and not self._looks_percent(secondary[1]):
+                metrics.favoriteCount = self._parse_number(secondary[1])
+                self._put_kv(kv, "收藏量", secondary[1])
+            if len(secondary) >= 3 and self._looks_percent(secondary[2]):
+                self._put_kv(kv, "划走率", secondary[2])
 
-        flow_values = self._values_after_label_sequence(lines, ["封面点击率", "文案展开率", "划走率"], 3)
-        if len(flow_values) >= 1:
-            self._put_kv(kv, "封面点击率", flow_values[0])
-        if len(flow_values) >= 2:
-            self._put_kv(kv, "文案展开率", flow_values[1])
-        if len(flow_values) >= 3:
-            self._put_kv(kv, "划走率", flow_values[2])
+        copy = self._values_after_label_sequence(lines, ["文案展开率", "平均浏览图片数"], 2)
+        if len(copy) >= 1:
+            self._put_kv(kv, "文案展开率", copy[0])
+        if len(copy) >= 2:
+            self._put_kv(kv, "平均浏览图片数", copy[1])
 
-        reading_values = self._values_after_label_sequence(lines, ["平均浏览图片数", "文案完读率", "评论进入率"], 3)
-        if len(reading_values) >= 1:
-            self._put_kv(kv, "平均浏览图片数", reading_values[0])
-        if len(reading_values) >= 2:
-            self._put_kv(kv, "文案完读率", reading_values[1])
-        if len(reading_values) >= 3:
-            self._put_kv(kv, "评论进入率", reading_values[2])
-
-        for label in ["播放量较往期上涨", "播放量较往期", "评论率", "分享率", "完播率", "5s完播率", "5S完播率"]:
-            value = self._find_inline_value(clean, label)
-            if value is not None:
-                self._put_kv(kv, "5s完播率" if label == "5S完播率" else label, value)
-
-        trend_values = self._leading_trend_values(lines)
-        if trend_values:
-            kv.setdefault("趋势曲线数值", trend_values)
-
-        completion = self._find_percent(clean, ["完播率", "播放完成率", "看完率"])
+        completion = self._find_inline_value(clean, "完播率") or self._find_percent(clean, ["完播率", "播放完成率", "看完率"])
         if completion:
             metrics.completionRate = completion
             self._put_kv(kv, "完播率", completion)
-        interaction = self._find_percent(clean, ["互动率", "评论率", "分享率"])
-        if interaction:
-            metrics.interactionRate = interaction
-        average_watch = self._find_seconds(clean, ["平均播放时长", "平均观看时长"])
-        if average_watch is not None:
-            metrics.averageWatchSeconds = average_watch
 
-        return metrics, kv
+    def _extract_chart(self, lines: list[str], metrics: Metrics, kv: dict[str, object]) -> None:
+        trend = self._leading_trend_values(lines)
+        if trend:
+            kv["趋势曲线数值"] = trend
+
+        fan = self._values_after_label_sequence(lines, ["涨粉量", "脱粉量", "粉丝播放占比"], 3)
+        if not fan:
+            return
+        metrics.followerGain = self._parse_number(fan[0])
+        self._put_kv(kv, "涨粉量", fan[0])
+        if len(fan) >= 2 and self._looks_percent(fan[1]):
+            self._put_kv(kv, "粉丝播放占比", fan[1])
+        elif len(fan) >= 2:
+            self._put_kv(kv, "脱粉量", fan[1])
+        if len(fan) >= 3:
+            self._put_kv(kv, "粉丝播放占比", fan[2])
+
+    def _extract_flow(self, lines: list[str], clean: str, metrics: Metrics, kv: dict[str, object]) -> None:
+        view = self._find_inline_value(clean, "播放量")
+        if view:
+            metrics.viewCount = self._parse_number(view)
+            self._put_kv(kv, "播放量", view)
+        uplift = self._find_inline_value(clean, "播放量较往期上涨") or self._find_inline_value(clean, "播放量较往期")
+        if uplift:
+            self._put_kv(kv, "播放量较往期上涨", uplift)
+
+        attraction = self._values_after_label_sequence(lines, ["封面点击率", "文案展开率", "划走率"], 3)
+        if len(attraction) >= 1:
+            self._put_kv(kv, "封面点击率", attraction[0])
+        if len(attraction) >= 2:
+            self._put_kv(kv, "文案展开率", attraction[1])
+        if len(attraction) >= 3:
+            self._put_kv(kv, "划走率", attraction[2])
+
+        reading = self._values_after_label_sequence(lines, ["平均浏览图片数", "文案完读率", "评论进入率"], 3)
+        if len(reading) >= 1:
+            self._put_kv(kv, "平均浏览图片数", reading[0])
+        if len(reading) >= 2:
+            self._put_kv(kv, "文案完读率", reading[1])
+        if len(reading) >= 3:
+            self._put_kv(kv, "评论进入率", reading[2])
+
+        for label in ["完播率", "5s完播率", "5S完播率", "评论率", "分享率"]:
+            value = self._find_inline_value(clean, label)
+            if value:
+                key = "5s完播率" if label == "5S完播率" else label
+                self._put_kv(kv, key, value)
+                if key == "完播率":
+                    metrics.completionRate = value
+                if key in ["评论率", "分享率"] and metrics.interactionRate is None:
+                    metrics.interactionRate = value
 
     def _metrics_to_key_value(self, metrics: Metrics) -> dict[str, object]:
         mapping = {
@@ -182,29 +203,22 @@ class SocialMetricsExtractor:
             kv[key] = str(value).strip() if not isinstance(value, list) else value
 
     def _find_inline_value(self, text: str, label: str) -> str | None:
-        patterns = [
-            rf"{re.escape(label)}[^0-9+\-]*([+\-]?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:%|万|千|w|W|k|K)?)",
-            rf"{re.escape(label)}\s*([+\-]?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:%|万|千|w|W|k|K)?)",
-        ]
-        for pattern in patterns:
-            m = re.search(pattern, text, re.IGNORECASE)
-            if m:
-                return m.group(1).replace(" ", "")
-        return None
+        pattern = rf"{re.escape(label)}[^0-9+\-]*([+\-]?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:%|万|千|w|W|k|K)?)"
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).replace(" ", "") if m else None
 
     def _leading_trend_values(self, lines: list[str]) -> list[str]:
-        start = -1
-        for idx, line in enumerate(lines):
-            if line in ["观众分析", "流量分析", "总览"]:
-                start = idx + 1
-        if start < 0:
+        marker = self._index_of_any(lines, ["观众分析", "流量分析", "总览"])
+        if marker < 0:
             return []
         values: list[str] = []
-        for line in lines[start:]:
-            if "05-" in line or "06-" in line or "DOU" in line or "粉丝" in line:
+        for line in lines[marker + 1:]:
+            if self._is_label_like(line) or "05-" in line or "06-" in line or "DOU" in line or "粉丝" in line:
                 break
             if self._first_number_token(line) == line.strip():
                 values.append(line.strip())
+            elif values:
+                break
             if len(values) >= 10:
                 break
         return values
@@ -231,13 +245,20 @@ class SocialMetricsExtractor:
                 return i
         return -1
 
+    def _index_of_any(self, lines: list[str], labels: list[str]) -> int:
+        normalized = {self._normalize_key(v) for v in labels}
+        for i, line in enumerate(lines):
+            if self._normalize_key(line) in normalized:
+                return i
+        return -1
+
     def _is_label_like(self, value: str) -> bool:
         if not value or self._first_number_token(value) == value.strip():
             return False
         labels = [
             "播放量", "点赞量", "评论量", "分享量", "收藏量", "划走率", "文案展开率", "平均浏览图片数",
-            "涨粉量", "脱粉量", "粉丝播放占比", "封面点击率", "文案完读率", "评论进入率",
-            "新增累计", "每小时", "每天", "设置观测>", "观看趋势", "留存分析"
+            "涨粉量", "脱粉量", "粉丝播放占比", "封面点击率", "文案完读率", "评论进入率", "完播率", "5s完播率",
+            "新增累计", "每小时", "每天", "设置观测>", "观看趋势", "留存分析", "内容吸引力", "流量上涨"
         ]
         return any(label in value for label in labels)
 
