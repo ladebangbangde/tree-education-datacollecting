@@ -19,7 +19,7 @@ class RecognitionService:
         self.temp_dir = Path("/tmp/tree-education-datacollecting")
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
-    async def recognize_upload(self, file: UploadFile, platform: str, scene: str) -> RecognitionResponse:
+    async def recognize_upload(self, file: UploadFile, platform: str, scene: str, content_type: str = "AUTO") -> RecognitionResponse:
         start = time.time()
         if not file.content_type or not file.content_type.startswith("image/"):
             raise BadRequestError("file must be an image")
@@ -28,6 +28,7 @@ class RecognitionService:
             raise BadRequestError("image is too large")
         original_filename = file.filename or "image.png"
         normalized_scene = self._normalize_scene_by_filename(original_filename, scene)
+        normalized_content_type = self._normalize_content_type_by_filename(original_filename, content_type)
         suffix = Path(original_filename).suffix or ".png"
         image_path = self.temp_dir / f"{uuid.uuid4().hex}{suffix}"
         image_path.write_bytes(content)
@@ -37,11 +38,13 @@ class RecognitionService:
             {
                 "requestId": request_id,
                 "filename": original_filename,
-                "contentType": file.content_type,
+                "contentTypeHeader": file.content_type,
                 "size": len(content),
                 "platform": platform,
                 "scene": scene,
                 "normalizedScene": normalized_scene,
+                "contentType": content_type,
+                "normalizedContentType": normalized_content_type,
                 "ocrEngineSetting": settings.ocr_engine,
                 "tempPath": str(image_path),
             },
@@ -51,7 +54,12 @@ class RecognitionService:
             print("\n===== OCR RAW TEXT BEGIN =====", flush=True)
             print(ocr.raw_text or "", flush=True)
             print("===== OCR RAW TEXT END =====\n", flush=True)
-            result = self.extractor.extract(ocr.raw_text, platform=platform, scene=normalized_scene)
+            result = self.extractor.extract(
+                ocr.raw_text,
+                platform=platform,
+                scene=normalized_scene,
+                content_type=normalized_content_type,
+            )
             self._debug_print(
                 "RECOGNITION PARSED RESULT",
                 {
@@ -65,11 +73,14 @@ class RecognitionService:
             warnings = []
             if not (ocr.raw_text or "").strip():
                 warnings.append("OCR 未识别出任何文字，请检查图片清晰度、裁剪范围、是否为截图/拍屏、是否存在强反光或压缩。")
+            if result.contentType in {"UNKNOWN", None} and normalized_scene != "ACCOUNT_OVERVIEW":
+                warnings.append("未能明确判断内容类型，建议 OA 后台人工选择图文或视频后重新解析/校验。")
             return RecognitionResponse(
                 requestId=request_id,
                 engine=ocr.engine,
                 platform=platform,
                 scene=normalized_scene,
+                contentType=result.contentType,
                 rawText=ocr.raw_text,
                 result=result,
                 warnings=warnings,
@@ -96,6 +107,18 @@ class RecognitionService:
         if any(keyword in filename for keyword in ["账号页面", "账号页", "账号封面", "主页", "首页资料", "个人页", "个人主页"]):
             return "ACCOUNT_OVERVIEW"
         return scene
+
+    def _normalize_content_type_by_filename(self, filename: str, content_type: str) -> str:
+        upper = (content_type or "AUTO").upper().replace("-", "_")
+        if upper in {"IMAGE_TEXT", "VIDEO", "ACCOUNT_OVERVIEW"}:
+            return upper
+        if any(keyword in filename for keyword in ["图文", "笔记", "图片", "小红书笔记"]):
+            return "IMAGE_TEXT"
+        if any(keyword in filename for keyword in ["视频", "短视频", "播放", "完播"]):
+            return "VIDEO"
+        if any(keyword in filename for keyword in ["账号页面", "账号页", "账号封面", "主页", "首页资料", "个人页", "个人主页"]):
+            return "ACCOUNT_OVERVIEW"
+        return "AUTO"
 
     def _debug_print(self, title: str, payload: dict) -> None:
         print(f"\n===== {title} =====", flush=True)
