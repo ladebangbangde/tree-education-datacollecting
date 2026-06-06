@@ -1,5 +1,5 @@
 import re
-from app.schemas.recognition import Metrics, RecognitionResult
+from app.schemas.recognition import ImageTextStats, Metrics, RecognitionResult, VideoStats
 
 
 class SocialMetricsExtractor:
@@ -14,9 +14,9 @@ class SocialMetricsExtractor:
         "关注", "粉丝", "点赞", "评论", "收藏", "分享", "转发", "播放", "浏览", "观看", "获赞", "阅读",
         "首页", "推荐", "朋友", "消息", "扫一扫", "直播", "广告", "打开", "复制", "搜索", "音乐", "拍同款",
         "创作者服务中心", "数据中心", "作品数据", "查看更多", "暂无", "加载", "发布", "私信", "添加朋友", "编辑主页",
-        "设置观测", "新增累计", "每小时", "每天", "DOUO", "DOU+", "投放DOU", "观看趋势", "留存分析", "跳出",
+        "设置观测", "新增累计", "每小时", "每天", "DOU+", "观看趋势", "留存分析", "跳出",
         "平均浏览图片数", "文案展开率", "文案完读率", "评论进入率", "封面点击率", "划走率", "内容吸引力",
-        "完播率", "5s完播率", "5秒完播率", "评论率", "分享率"
+        "完播率", "5s完播率", "5秒完播率", "评论率", "分享率", "平均播放时长", "平均观看时长"
     ]
 
     ACCOUNT_PAGE_HINTS = [
@@ -25,186 +25,249 @@ class SocialMetricsExtractor:
 
     NUMBER_RE = re.compile(r"[+\-]?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:%|万|千|w|W|k|K)?")
 
-    def extract(self, text: str, platform: str | None = None, scene: str | None = None) -> RecognitionResult:
+    def extract(
+        self,
+        text: str,
+        platform: str | None = None,
+        scene: str | None = None,
+        content_type: str | None = "AUTO",
+    ) -> RecognitionResult:
         clean = self._normalize_text(text or "")
         lines = self._lines(clean)
         platform_upper = (platform or "").upper()
         scene_upper = (scene or "").upper()
+        requested_content_type = self._normalize_content_type(content_type)
 
-        if scene_upper == "ACCOUNT_OVERVIEW" or self._looks_like_account_page(clean, lines):
+        if scene_upper == "ACCOUNT_OVERVIEW" or requested_content_type == "ACCOUNT_OVERVIEW" or self._looks_like_account_page(clean, lines):
             return self._extract_account_overview(clean, lines, platform=platform)
 
-        if platform_upper == "DOUYIN" and self._looks_like_douyin_data_page(clean):
-            page_type = self._douyin_data_page_type(clean)
-            content_mode = self._douyin_content_mode(clean)
-            metrics, key_value_metrics = self._extract_douyin_required_metrics(clean, lines, page_type, content_mode)
+        detected_content_type = requested_content_type
+        if detected_content_type == "AUTO":
+            detected_content_type = self._detect_content_type(clean, platform_upper)
+
+        if detected_content_type == "VIDEO":
+            metrics, video_stats, key_value_metrics = self._extract_video(clean, lines, platform_upper)
+            image_text_stats = None
+        elif detected_content_type == "IMAGE_TEXT":
+            metrics, image_text_stats, key_value_metrics = self._extract_image_text(clean, lines, platform_upper)
+            video_stats = None
         else:
-            metrics = Metrics(
-                viewCount=self._find_number(clean, ["播放", "浏览", "阅读", "观看", "展现", "曝光"]),
-                likeCount=self._find_number(clean, ["点赞", "获赞", "赞"]),
-                commentCount=self._find_number(clean, ["评论"]),
-                favoriteCount=self._find_number(clean, ["收藏"]),
-                followerGain=self._find_number(clean, ["涨粉", "新增粉丝", "转粉", "粉丝增量", "净增粉丝"]),
-                completionRate=self._find_percent(clean, ["完播率", "播放完成率", "看完率"]),
-                interactionRate=self._find_percent(clean, ["互动率", "互动转化率"]),
-            )
-            key_value_metrics = self._metrics_to_key_value(metrics)
+            metrics, image_text_stats, video_stats, key_value_metrics = self._extract_unknown(clean)
 
         candidates = self._title_candidates(lines, platform=platform)
         title = candidates[0] if candidates else None
         account_name = self._extract_account_name(lines)
         account_id = self._extract_account_id(clean, platform=platform)
         filled = sum(1 for v in metrics.model_dump().values() if v is not None) + len(key_value_metrics)
-        confidence = min(0.96, 0.35 + filled * 0.04 + (0.20 if title else 0) + (0.08 if account_name else 0) + (0.05 if account_id else 0))
+        confidence = min(
+            0.96,
+            0.32
+            + filled * 0.04
+            + (0.12 if detected_content_type in {"IMAGE_TEXT", "VIDEO"} else 0)
+            + (0.18 if title else 0)
+            + (0.08 if account_name else 0)
+            + (0.05 if account_id else 0),
+        )
         return RecognitionResult(
             accountName=account_name,
             accountId=account_id,
             douyinId=account_id if platform_upper == "DOUYIN" else None,
             wechatChannelId=account_id if platform_upper == "WECHAT_CHANNEL" else None,
+            contentType=detected_content_type,
             contentTitle=title,
             candidateTitles=candidates[:5],
             metrics=metrics,
+            imageTextStats=image_text_stats,
+            videoStats=video_stats,
             keyValueMetrics=key_value_metrics,
             confidence=confidence,
         )
 
-    def _looks_like_douyin_data_page(self, clean: str) -> bool:
-        return "作品数据详情" in clean and ("总览" in clean or "流量分析" in clean or "观众分析" in clean)
-
-    def _douyin_content_mode(self, clean: str) -> str:
-        image_text_markers = ["文案展开率", "文案完读率", "平均浏览图片数", "封面点击率", "评论进入率", "划走率", "图文"]
-        video_markers = ["5s完播率", "5S完播率", "5秒完播率", "五秒完播率", "平均播放时长", "平均观看时长", "完播率"]
-        if any(marker in clean for marker in image_text_markers):
+    def _detect_content_type(self, clean: str, platform_upper: str) -> str:
+        image_text_markers = [
+            "图文", "笔记", "阅读", "浏览图片", "平均浏览图片数", "文案展开率", "文案完读率", "封面点击率", "评论进入率", "划走率"
+        ]
+        video_markers = [
+            "视频", "播放量", "完播率", "5s完播率", "5S完播率", "5秒完播率", "平均播放时长", "平均观看时长", "播放完成率", "观看时长"
+        ]
+        image_hits = sum(1 for marker in image_text_markers if marker in clean)
+        video_hits = sum(1 for marker in video_markers if marker in clean)
+        if image_hits > video_hits:
             return "IMAGE_TEXT"
-        if any(marker in clean for marker in video_markers):
+        if video_hits > image_hits:
             return "VIDEO"
-        return "IMAGE_TEXT"
+        if platform_upper == "XIAOHONGSHU" and any(word in clean for word in ["笔记", "阅读", "收藏"]):
+            return "IMAGE_TEXT"
+        if platform_upper == "DOUYIN" and any(word in clean for word in ["完播", "平均播放", "5秒"]):
+            return "VIDEO"
+        return "UNKNOWN"
 
-    def _douyin_data_page_type(self, clean: str) -> str:
-        if any(word in clean for word in ["内容吸引力", "封面点击率", "文案完读率", "评论进入率", "流量上涨", "完播率", "5s完播率", "5秒完播率"]):
-            return "FLOW"
-        if "涨粉量" in clean or "粉丝播放占比" in clean:
-            return "CHART"
-        return "OVERVIEW"
+    def _extract_image_text(self, clean: str, lines: list[str], platform_upper: str) -> tuple[Metrics, ImageTextStats, dict[str, object]]:
+        stats = ImageTextStats(
+            readCount=self._find_number(clean, ["阅读", "阅读量", "浏览", "浏览量"]),
+            viewCount=self._find_number(clean, ["播放", "播放量", "浏览", "浏览量", "阅读", "阅读量", "观看", "展现", "曝光"]),
+            likeCount=self._find_number(clean, ["点赞", "点赞量", "获赞", "赞"]),
+            commentCount=self._find_number(clean, ["评论", "评论量"]),
+            favoriteCount=self._find_number(clean, ["收藏", "收藏量"]),
+            shareCount=self._find_number(clean, ["分享", "分享量", "转发", "转发量"]),
+            imageCount=self._find_image_count(clean),
+            coverClickRate=self._find_percent(clean, ["封面点击率"]),
+            copyExpandRate=self._find_percent(clean, ["文案展开率"]),
+            copyFinishRate=self._find_percent(clean, ["文案完读率", "文案阅读完成率"]),
+            commentEnterRate=self._find_percent(clean, ["评论进入率"]),
+            slideAwayRate=self._find_percent(clean, ["划走率"]),
+            followerGain=self._find_number(clean, ["涨粉", "涨粉量", "新增粉丝", "转粉", "粉丝增量", "净增粉丝"]),
+        )
 
-    def _extract_douyin_required_metrics(self, clean: str, lines: list[str], page_type: str, content_mode: str) -> tuple[Metrics, dict[str, object]]:
-        metrics = Metrics()
-        kv: dict[str, object] = {}
-        if content_mode == "IMAGE_TEXT":
-            if page_type == "OVERVIEW":
-                self._extract_douyin_image_text_overview(lines, clean, metrics, kv)
-            elif page_type == "CHART":
-                self._extract_douyin_image_text_chart(lines, metrics, kv)
-            else:
-                self._extract_douyin_image_text_flow(lines, clean, metrics, kv)
-        else:
-            if page_type == "OVERVIEW":
-                self._extract_douyin_video_overview(lines, clean, metrics, kv)
-            elif page_type == "CHART":
-                self._extract_douyin_video_chart(lines, metrics, kv)
-            else:
-                self._extract_douyin_video_flow(lines, clean, metrics, kv)
-        return metrics, kv
+        if platform_upper == "DOUYIN" and self._looks_like_douyin_data_page(clean):
+            self._patch_douyin_image_text(clean, lines, stats)
 
-    def _extract_douyin_image_text_overview(self, lines: list[str], clean: str, metrics: Metrics, kv: dict[str, object]) -> None:
+        metrics = Metrics(
+            viewCount=stats.viewCount or stats.readCount,
+            likeCount=stats.likeCount,
+            commentCount=stats.commentCount,
+            favoriteCount=stats.favoriteCount,
+            shareCount=stats.shareCount,
+            followerGain=stats.followerGain,
+        )
+        kv = self._stats_to_key_value(stats, {
+            "readCount": "阅读量",
+            "viewCount": "播放/浏览量",
+            "likeCount": "点赞量",
+            "commentCount": "评论量",
+            "favoriteCount": "收藏量",
+            "shareCount": "分享量",
+            "imageCount": "图片数",
+            "coverClickRate": "封面点击率",
+            "copyExpandRate": "文案展开率",
+            "copyFinishRate": "文案完读率",
+            "commentEnterRate": "评论进入率",
+            "slideAwayRate": "划走率",
+            "followerGain": "涨粉量",
+        })
+        return metrics, stats, kv
+
+    def _extract_video(self, clean: str, lines: list[str], platform_upper: str) -> tuple[Metrics, VideoStats, dict[str, object]]:
+        stats = VideoStats(
+            playCount=self._find_number(clean, ["播放", "播放量", "观看", "观看量"]),
+            exposureCount=self._find_number(clean, ["曝光", "曝光量", "展现", "展现量", "推荐曝光"]),
+            likeCount=self._find_number(clean, ["点赞", "点赞量", "获赞", "赞"]),
+            commentCount=self._find_number(clean, ["评论", "评论量"]),
+            favoriteCount=self._find_number(clean, ["收藏", "收藏量"]),
+            shareCount=self._find_number(clean, ["分享", "分享量", "转发", "转发量"]),
+            completionRate=self._find_percent(clean, ["完播率", "播放完成率", "看完率", "整体完播率"]),
+            fiveSecondCompletionRate=self._find_percent(clean, ["5s完播率", "5S完播率", "5秒完播率", "五秒完播率", "前5秒完播率"]),
+            averageWatchText=self._find_duration_text(clean, ["平均播放时长", "平均观看时长", "平均观看", "观看时长"]),
+            durationText=self._find_duration_text(clean, ["视频时长", "作品时长", "时长"]),
+            interactionRate=self._find_percent(clean, ["互动率", "评论率", "分享率", "互动转化率"]),
+            followerGain=self._find_number(clean, ["涨粉", "涨粉量", "新增粉丝", "转粉", "粉丝增量", "净增粉丝"]),
+            profileVisitCount=self._find_number(clean, ["主页访问", "主页访问量", "主页访客", "主页浏览"]),
+        )
+        stats.averageWatchSeconds = self._duration_text_to_seconds(stats.averageWatchText)
+        stats.durationSeconds = self._duration_text_to_seconds(stats.durationText)
+
+        if platform_upper == "DOUYIN" and self._looks_like_douyin_data_page(clean):
+            self._patch_douyin_video(clean, lines, stats)
+
+        metrics = Metrics(
+            viewCount=stats.playCount,
+            likeCount=stats.likeCount,
+            commentCount=stats.commentCount,
+            favoriteCount=stats.favoriteCount,
+            shareCount=stats.shareCount,
+            followerGain=stats.followerGain,
+            completionRate=stats.completionRate,
+            interactionRate=stats.interactionRate,
+            averageWatchSeconds=stats.averageWatchSeconds,
+            profileVisitCount=stats.profileVisitCount,
+        )
+        kv = self._stats_to_key_value(stats, {
+            "playCount": "播放量",
+            "exposureCount": "曝光量",
+            "likeCount": "点赞量",
+            "commentCount": "评论量",
+            "favoriteCount": "收藏量",
+            "shareCount": "分享量",
+            "completionRate": "完播率",
+            "fiveSecondCompletionRate": "5s完播率",
+            "averageWatchText": "平均观看时长",
+            "durationText": "视频时长",
+            "interactionRate": "互动率",
+            "followerGain": "涨粉量",
+            "profileVisitCount": "主页访问量",
+        })
+        return metrics, stats, kv
+
+    def _extract_unknown(self, clean: str) -> tuple[Metrics, None, None, dict[str, object]]:
+        metrics = Metrics(
+            viewCount=self._find_number(clean, ["播放", "浏览", "阅读", "观看", "展现", "曝光"]),
+            likeCount=self._find_number(clean, ["点赞", "获赞", "赞"]),
+            commentCount=self._find_number(clean, ["评论"]),
+            favoriteCount=self._find_number(clean, ["收藏"]),
+            shareCount=self._find_number(clean, ["分享", "转发"]),
+            followerGain=self._find_number(clean, ["涨粉", "新增粉丝", "转粉", "粉丝增量", "净增粉丝"]),
+            completionRate=self._find_percent(clean, ["完播率", "播放完成率", "看完率"]),
+            interactionRate=self._find_percent(clean, ["互动率", "互动转化率"]),
+        )
+        return metrics, None, None, self._metrics_to_key_value(metrics)
+
+    def _patch_douyin_image_text(self, clean: str, lines: list[str], stats: ImageTextStats) -> None:
         primary = self._values_after_label_sequence(lines, ["播放量", "点赞量", "评论量"], 3)
         if len(primary) >= 1:
-            metrics.viewCount = self._parse_number(primary[0]); self._put_kv(kv, "播放量", primary[0])
+            stats.viewCount = self._parse_number(primary[0])
         if len(primary) >= 2:
-            metrics.likeCount = self._parse_number(primary[1]); self._put_kv(kv, "点赞量", primary[1])
+            stats.likeCount = self._parse_number(primary[1])
         if len(primary) >= 3:
-            metrics.commentCount = self._parse_number(primary[2]); self._put_kv(kv, "评论量", primary[2])
+            stats.commentCount = self._parse_number(primary[2])
 
         secondary = self._values_after_label_sequence(lines, ["分享量", "收藏量", "划走率"], 3)
+        if len(secondary) >= 1:
+            stats.shareCount = self._parse_number(secondary[0]) or stats.shareCount
         if len(secondary) >= 2 and not self._looks_percent(secondary[1]):
-            metrics.favoriteCount = self._parse_number(secondary[1]); self._put_kv(kv, "收藏量", secondary[1])
-        elif len(secondary) >= 3 and not self._looks_percent(secondary[1]):
-            metrics.favoriteCount = self._parse_number(secondary[1]); self._put_kv(kv, "收藏量", secondary[1])
-        else:
-            favorite = self._find_inline_value(clean, "收藏量") or self._value_after_any_label(lines, ["收藏量"])
-            if favorite and not self._looks_percent(favorite):
-                metrics.favoriteCount = self._parse_number(favorite); self._put_kv(kv, "收藏量", favorite)
+            stats.favoriteCount = self._parse_number(secondary[1]) or stats.favoriteCount
+        if len(secondary) >= 3:
+            stats.slideAwayRate = secondary[2] if self._looks_percent(secondary[2]) else stats.slideAwayRate
 
-        copy_expand = self._find_inline_value(clean, "文案展开率") or self._value_after_any_label(lines, ["文案展开率"])
-        if copy_expand:
-            self._put_kv(kv, "文案展开率", copy_expand)
+        flow = {
+            "coverClickRate": ["封面点击率"],
+            "copyExpandRate": ["文案展开率"],
+            "copyFinishRate": ["文案完读率"],
+            "commentEnterRate": ["评论进入率"],
+            "slideAwayRate": ["划走率"],
+        }
+        for field, labels in flow.items():
+            value = self._find_percent(clean, labels) or self._value_after_any_label(lines, labels)
+            if value:
+                setattr(stats, field, value)
+        image_count = self._value_after_any_label(lines, ["平均浏览图片数"])
+        if image_count:
+            stats.imageCount = self._parse_number(image_count) or stats.imageCount
 
-    def _extract_douyin_image_text_chart(self, lines: list[str], metrics: Metrics, kv: dict[str, object]) -> None:
-        fan = self._values_after_label_sequence(lines, ["涨粉量", "脱粉量", "粉丝播放占比"], 3)
-        if fan:
-            metrics.followerGain = self._parse_number(fan[0]); self._put_kv(kv, "涨粉量", fan[0])
-            return
-        value = self._value_after_any_label(lines, ["涨粉量"])
-        if value:
-            metrics.followerGain = self._parse_number(value); self._put_kv(kv, "涨粉量", value)
-
-    def _extract_douyin_image_text_flow(self, lines: list[str], clean: str, metrics: Metrics, kv: dict[str, object]) -> None:
-        attraction = self._values_after_label_sequence(lines, ["封面点击率", "文案展开率", "划走率"], 3)
-        if len(attraction) >= 1:
-            self._put_kv(kv, "封面点击率", attraction[0])
-        if len(attraction) >= 2:
-            self._put_kv(kv, "文案展开率", attraction[1])
-        reading = self._values_after_label_sequence(lines, ["平均浏览图片数", "文案完读率", "评论进入率"], 3)
-        if len(reading) >= 2:
-            self._put_kv(kv, "文案完读率", reading[1])
-        if len(reading) >= 3:
-            self._put_kv(kv, "评论进入率", reading[2])
-        for label in ["封面点击率", "文案展开率", "文案完读率", "评论进入率"]:
-            if label not in kv:
-                value = self._find_inline_value(clean, label) or self._value_after_any_label(lines, [label])
-                if value:
-                    self._put_kv(kv, label, value)
-
-    def _extract_douyin_video_overview(self, lines: list[str], clean: str, metrics: Metrics, kv: dict[str, object]) -> None:
+    def _patch_douyin_video(self, clean: str, lines: list[str], stats: VideoStats) -> None:
         primary = self._values_after_label_sequence(lines, ["播放量", "点赞量", "评论量"], 3)
         if len(primary) >= 1:
-            metrics.viewCount = self._parse_number(primary[0]); self._put_kv(kv, "播放量", primary[0])
+            stats.playCount = self._parse_number(primary[0])
         if len(primary) >= 2:
-            metrics.likeCount = self._parse_number(primary[1]); self._put_kv(kv, "点赞量", primary[1])
+            stats.likeCount = self._parse_number(primary[1])
         if len(primary) >= 3:
-            metrics.commentCount = self._parse_number(primary[2]); self._put_kv(kv, "评论量", primary[2])
+            stats.commentCount = self._parse_number(primary[2])
         favorite = self._find_inline_value(clean, "收藏量") or self._value_after_any_label(lines, ["收藏量"])
         if favorite and not self._looks_percent(favorite):
-            metrics.favoriteCount = self._parse_number(favorite); self._put_kv(kv, "收藏量", favorite)
-        completion = self._completion_value(clean, lines)
-        if completion:
-            metrics.completionRate = completion; self._put_kv(kv, "完播率", completion)
-        five = self._five_second_completion_value(clean, lines)
-        if five:
-            self._put_kv(kv, "5s完播率", five)
+            stats.favoriteCount = self._parse_number(favorite) or stats.favoriteCount
+        share = self._find_inline_value(clean, "分享量") or self._value_after_any_label(lines, ["分享量"])
+        if share and not self._looks_percent(share):
+            stats.shareCount = self._parse_number(share) or stats.shareCount
+        stats.completionRate = self._find_percent(clean, ["完播率", "播放完成率", "看完率", "整体完播率"]) or stats.completionRate
+        stats.fiveSecondCompletionRate = self._find_percent(clean, ["5s完播率", "5S完播率", "5秒完播率", "五秒完播率", "前5秒完播率"]) or stats.fiveSecondCompletionRate
 
-    def _extract_douyin_video_chart(self, lines: list[str], metrics: Metrics, kv: dict[str, object]) -> None:
-        self._extract_douyin_image_text_chart(lines, metrics, kv)
-
-    def _extract_douyin_video_flow(self, lines: list[str], clean: str, metrics: Metrics, kv: dict[str, object]) -> None:
-        completion = self._completion_value(clean, lines)
-        if completion:
-            metrics.completionRate = completion; self._put_kv(kv, "完播率", completion)
-        five = self._five_second_completion_value(clean, lines)
-        if five:
-            self._put_kv(kv, "5s完播率", five)
-        for label in ["评论率", "分享率"]:
-            value = self._find_inline_value(clean, label) or self._value_after_any_label(lines, [label])
-            if value:
-                self._put_kv(kv, label, value)
-                if metrics.interactionRate is None:
-                    metrics.interactionRate = value
-
-    def _completion_value(self, clean: str, lines: list[str]) -> str | None:
-        return self._find_inline_value(clean, "完播率") or self._find_inline_value(clean, "播放完成率") or self._find_inline_value(clean, "看完率") or self._value_after_any_label(lines, ["完播率", "播放完成率", "看完率", "整体完播率"])
-
-    def _five_second_completion_value(self, clean: str, lines: list[str]) -> str | None:
-        labels = ["5s完播率", "5S完播率", "5秒完播率", "5秒完播", "五秒完播率", "五秒完播", "前5秒完播率"]
-        for label in labels:
-            value = self._find_inline_value(clean, label)
-            if value:
-                return value
-        return self._value_after_any_label(lines, labels)
+    def _looks_like_douyin_data_page(self, clean: str) -> bool:
+        return "作品数据详情" in clean and ("总览" in clean or "流量分析" in clean or "观众分析" in clean)
 
     def _value_after_any_label(self, lines: list[str], labels: list[str]) -> str | None:
         normalized_labels = {self._normalize_key(label).lower() for label in labels}
         for index, line in enumerate(lines):
-            if self._normalize_key(line).lower() in normalized_labels or any(label in line for label in labels):
+            normalized_line = self._normalize_key(line).lower()
+            if normalized_line in normalized_labels or any(label in line for label in labels):
                 same_line = self._first_number_token(line)
                 if same_line and same_line != line.strip():
                     return same_line
@@ -213,23 +276,6 @@ class SocialMetricsExtractor:
                     if value:
                         return value
         return None
-
-    def _metrics_to_key_value(self, metrics: Metrics) -> dict[str, object]:
-        mapping = {
-            "viewCount": "播放量", "likeCount": "点赞量", "commentCount": "评论量", "favoriteCount": "收藏量",
-            "followerGain": "涨粉量", "completionRate": "完播率", "interactionRate": "互动率",
-        }
-        data = metrics.model_dump()
-        return {cn: value for field, cn in mapping.items() if (value := data.get(field)) is not None}
-
-    def _put_kv(self, kv: dict[str, object], key: str, value: object | None) -> None:
-        if key and value is not None and str(value).strip() and str(value).strip().lower() != "null":
-            kv[key] = str(value).strip() if not isinstance(value, list) else value
-
-    def _find_inline_value(self, text: str, label: str) -> str | None:
-        pattern = rf"{re.escape(label)}[^0-9+\-]*([+\-]?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:%|万|千|w|W|k|K)?)"
-        m = re.search(pattern, text, re.IGNORECASE)
-        return m.group(1).replace(" ", "") if m else None
 
     def _values_after_label_sequence(self, lines: list[str], labels: list[str], desired: int) -> list[str]:
         start = self._index_of_sequence(lines, labels)
@@ -263,6 +309,29 @@ class SocialMetricsExtractor:
         ]
         return any(label in value for label in labels)
 
+    def _stats_to_key_value(self, stats: ImageTextStats | VideoStats, mapping: dict[str, str]) -> dict[str, object]:
+        data = stats.model_dump()
+        return {cn: value for field, cn in mapping.items() if (value := data.get(field)) is not None}
+
+    def _metrics_to_key_value(self, metrics: Metrics) -> dict[str, object]:
+        mapping = {
+            "viewCount": "播放/浏览/阅读量",
+            "likeCount": "点赞量",
+            "commentCount": "评论量",
+            "favoriteCount": "收藏量",
+            "shareCount": "分享量",
+            "followerGain": "涨粉量",
+            "completionRate": "完播率",
+            "interactionRate": "互动率",
+        }
+        data = metrics.model_dump()
+        return {cn: value for field, cn in mapping.items() if (value := data.get(field)) is not None}
+
+    def _find_inline_value(self, text: str, label: str) -> str | None:
+        pattern = rf"{re.escape(label)}[^0-9+\-]*([+\-]?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:%|万|千|w|W|k|K)?)"
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).replace(" ", "") if m else None
+
     def _first_number_token(self, value: str) -> str | None:
         if not value:
             return None
@@ -293,9 +362,12 @@ class SocialMetricsExtractor:
             accountId=account_id,
             douyinId=account_id if platform_upper == "DOUYIN" else None,
             wechatChannelId=account_id if platform_upper == "WECHAT_CHANNEL" else None,
+            contentType="ACCOUNT_OVERVIEW",
             contentTitle=None,
             candidateTitles=[],
             metrics=Metrics(),
+            imageTextStats=None,
+            videoStats=None,
             keyValueMetrics={},
             confidence=confidence,
         )
@@ -306,6 +378,10 @@ class SocialMetricsExtractor:
         value = value.replace("抖音 号", "抖音号").replace("抖 音号", "抖音号").replace("抖音帳", "抖音号")
         value = value.replace("视频 号", "视频号").replace("视 频号", "视频号")
         return value
+
+    def _normalize_content_type(self, content_type: str | None) -> str:
+        value = (content_type or "AUTO").upper().replace("-", "_")
+        return value if value in {"AUTO", "IMAGE_TEXT", "VIDEO", "ACCOUNT_OVERVIEW"} else "AUTO"
 
     def _find_number(self, text: str, labels: list[str]) -> int | None:
         for label in labels:
@@ -321,12 +397,50 @@ class SocialMetricsExtractor:
 
     def _find_percent(self, text: str, labels: list[str]) -> str | None:
         for label in labels:
-            patterns = [rf"{label}[^0-9\.]*([0-9]+(?:\.[0-9]+)?\s*%)", rf"([0-9]+(?:\.[0-9]+)?\s*%)[^0-9%]*{label}"]
+            patterns = [
+                rf"{label}[^0-9\.]*([0-9]+(?:\.[0-9]+)?\s*%)",
+                rf"([0-9]+(?:\.[0-9]+)?\s*%)[^0-9%]*{label}",
+            ]
             for pattern in patterns:
                 m = re.search(pattern, text, re.IGNORECASE)
                 if m:
                     return m.group(1).replace(" ", "")
         return None
+
+    def _find_image_count(self, text: str) -> int | None:
+        patterns = [r"([0-9]+)\s*张图", r"共\s*([0-9]+)\s*张", r"图片数[^0-9]*([0-9]+)"]
+        for pattern in patterns:
+            m = re.search(pattern, text)
+            if m:
+                return self._parse_number(m.group(1))
+        return None
+
+    def _find_duration_text(self, text: str, labels: list[str]) -> str | None:
+        duration = r"([0-9]+(?:\.[0-9]+)?\s*(?:分|分钟|min|m)?\s*[0-9]*(?:\.[0-9]+)?\s*(?:秒|s|sec|秒钟)?)"
+        for label in labels:
+            patterns = [rf"{label}[^0-9]*{duration}", rf"{duration}[^0-9]*{label}"]
+            for pattern in patterns:
+                m = re.search(pattern, text, re.IGNORECASE)
+                if m:
+                    return m.group(1).replace(" ", "")
+        return None
+
+    def _duration_text_to_seconds(self, value: str | None) -> float | None:
+        if not value:
+            return None
+        text = value.lower().replace("分钟", "分").replace("秒钟", "秒").replace("sec", "s")
+        minute = 0.0
+        second = 0.0
+        minute_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(?:分|min|m)", text)
+        if minute_match:
+            minute = float(minute_match.group(1))
+        second_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(?:秒|s)", text)
+        if second_match:
+            second = float(second_match.group(1))
+        if minute_match or second_match:
+            return minute * 60 + second
+        number = re.search(r"[0-9]+(?:\.[0-9]+)?", text)
+        return float(number.group(0)) if number else None
 
     def _parse_number(self, value: str | None) -> int | None:
         if value is None:
@@ -336,9 +450,11 @@ class SocialMetricsExtractor:
             return None
         multiplier = 1
         if s.endswith("万") or s.endswith("w"):
-            multiplier = 10000; s = s[:-1]
+            multiplier = 10000
+            s = s[:-1]
         elif s.endswith("千") or s.endswith("k"):
-            multiplier = 1000; s = s[:-1]
+            multiplier = 1000
+            s = s[:-1]
         try:
             return int(float(s) * multiplier)
         except ValueError:
@@ -428,10 +544,14 @@ class SocialMetricsExtractor:
 
     def _title_score(self, line: str) -> int:
         score = 0
-        if re.search(r"[\u4e00-\u9fa5]", line): score += 25
-        if any(word in line for word in self.BUSINESS_WORDS): score += 30
-        if 6 <= len(line) <= 45: score += 18
-        elif 46 <= len(line) <= 70: score += 8
+        if re.search(r"[\u4e00-\u9fa5]", line):
+            score += 25
+        if any(word in line for word in self.BUSINESS_WORDS):
+            score += 30
+        if 6 <= len(line) <= 45:
+            score += 18
+        elif 46 <= len(line) <= 70:
+            score += 8
         return score
 
     def _is_valid_title_line(self, line: str | None) -> bool:
