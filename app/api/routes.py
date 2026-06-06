@@ -29,8 +29,9 @@ async def recognize_image(
     file: UploadFile = File(...),
     platform: str = Form("UNKNOWN"),
     scene: str = Form("UNKNOWN"),
+    contentType: str = Form("AUTO"),
 ) -> RecognitionResponse:
-    return await service.recognize_upload(file=file, platform=platform, scene=scene)
+    return await service.recognize_upload(file=file, platform=platform, scene=scene, content_type=contentType)
 
 
 @router.post("/recognize/batch", response_model=BatchRecognitionResponse)
@@ -39,8 +40,9 @@ async def recognize_batch(
     files: list[UploadFile] = File(...),
     platform: str = Form("UNKNOWN"),
     scene: str = Form("UNKNOWN"),
+    contentType: str = Form("AUTO"),
 ) -> BatchRecognitionResponse:
     results = []
     for file in files:
-        results.append(await service.recognize_upload(file=file, platform=platform, scene=scene))
+        results.append(await service.recognize_upload(file=file, platform=platform, scene=scene, content_type=contentType))
     return BatchRecognitionResponse(total=len(results), results=results)
