@@ -5,7 +5,7 @@
 这个项目只做一件事：
 
 ```text
-图片 / 截图 -> OCR识别 -> 结构化字段抽取 -> JSON返回给OA后端
+图片 / 截图 -> OCR识别 -> 判断内容类型 -> 结构化字段抽取 -> JSON返回给OA后端
 ```
 
 它不负责人工审核、运营任务管理、最终业务入库、报表展示、OA 权限体系。这些都由 `tree-education-ioas` 和 `tree-education-ioas-frontend` 负责。
@@ -19,7 +19,7 @@ OA后端 tree-education-ioas
   ↓ multipart/form-data 调用
 图片识别服务 tree-education-datacollecting
   ↓
-返回 OCR原文 + 结构化运营数据 + 置信度
+返回 OCR原文 + 内容类型 + 图文/视频结构化运营数据 + 置信度
   ↓
 OA后端保存、审核、入库、统计
 ```
@@ -54,8 +54,40 @@ curl -X POST http://localhost:18083/api/v1/recognize \
   -H "Authorization: Bearer dev-recognition-token" \
   -F "file=@demo.png" \
   -F "platform=XIAOHONGSHU" \
-  -F "scene=CONTENT_DETAIL"
+  -F "scene=CONTENT_DETAIL" \
+  -F "contentType=AUTO"
 ```
+
+显式指定图文：
+
+```bash
+curl -X POST http://localhost:18083/api/v1/recognize \
+  -H "Authorization: Bearer dev-recognition-token" \
+  -F "file=@image-text.png" \
+  -F "platform=DOUYIN" \
+  -F "scene=CONTENT_DETAIL" \
+  -F "contentType=IMAGE_TEXT"
+```
+
+显式指定视频：
+
+```bash
+curl -X POST http://localhost:18083/api/v1/recognize \
+  -H "Authorization: Bearer dev-recognition-token" \
+  -F "file=@video.png" \
+  -F "platform=DOUYIN" \
+  -F "scene=CONTENT_DETAIL" \
+  -F "contentType=VIDEO"
+```
+
+## contentType 说明
+
+| 值 | 说明 |
+|---|---|
+| `AUTO` | 自动识别图文/视频，默认值 |
+| `IMAGE_TEXT` | 图文、笔记、图片类作品截图 |
+| `VIDEO` | 短视频作品截图 |
+| `ACCOUNT_OVERVIEW` | 账号主页 / 账号概览截图 |
 
 ## PaddleOCR 模式
 
@@ -73,17 +105,51 @@ docker compose -f docker-compose.paddle.yml up -d --build
 
 ## 返回字段
 
+通用字段：
+
 - `rawText`：OCR 原始文本
-- `textBlocks`：文本块、置信度、坐标
+- `contentType`：最终识别出来的内容类型
 - `result.accountName`：账号名
+- `result.accountId`：平台账号 ID
 - `result.contentTitle`：作品标题
-- `result.metrics.viewCount`：播放/浏览/阅读数
-- `result.metrics.likeCount`：点赞数
-- `result.metrics.commentCount`：评论数
-- `result.metrics.favoriteCount`：收藏数
-- `result.metrics.shareCount`：分享/转发数
-- `result.metrics.followerCount`：粉丝数
+- `result.candidateTitles`：候选标题
 - `result.confidence`：综合置信度
+- `result.metrics`：兼容旧版 OA 的通用指标
+- `result.keyValueMetrics`：中文指标名和值，适合直接给人工校验页展示
+
+图文字段：
+
+- `result.imageTextStats.readCount`：阅读量
+- `result.imageTextStats.viewCount`：播放/浏览量
+- `result.imageTextStats.likeCount`：点赞量
+- `result.imageTextStats.commentCount`：评论量
+- `result.imageTextStats.favoriteCount`：收藏量
+- `result.imageTextStats.shareCount`：分享量
+- `result.imageTextStats.imageCount`：图片数
+- `result.imageTextStats.coverClickRate`：封面点击率
+- `result.imageTextStats.copyExpandRate`：文案展开率
+- `result.imageTextStats.copyFinishRate`：文案完读率
+- `result.imageTextStats.commentEnterRate`：评论进入率
+- `result.imageTextStats.slideAwayRate`：划走率
+- `result.imageTextStats.followerGain`：涨粉量
+
+视频字段：
+
+- `result.videoStats.playCount`：播放量
+- `result.videoStats.exposureCount`：曝光量
+- `result.videoStats.likeCount`：点赞量
+- `result.videoStats.commentCount`：评论量
+- `result.videoStats.favoriteCount`：收藏量
+- `result.videoStats.shareCount`：分享量
+- `result.videoStats.completionRate`：完播率
+- `result.videoStats.fiveSecondCompletionRate`：5s 完播率
+- `result.videoStats.averageWatchSeconds`：平均观看秒数
+- `result.videoStats.averageWatchText`：平均观看时长原文
+- `result.videoStats.durationSeconds`：视频秒数
+- `result.videoStats.durationText`：视频时长原文
+- `result.videoStats.interactionRate`：互动率
+- `result.videoStats.followerGain`：涨粉量
+- `result.videoStats.profileVisitCount`：主页访问量
 
 ## OA 对接原则
 
@@ -94,3 +160,11 @@ OA前端 -> tree-education-ioas -> tree-education-datacollecting
 ```
 
 OA 后端负责登录鉴权、保存识别结果、人工审核、最终入库。
+
+建议 OA 后端入库时按 `contentType` 分流：
+
+```text
+contentType = IMAGE_TEXT -> 保存 image_text_stats
+contentType = VIDEO      -> 保存 video_stats
+contentType = UNKNOWN    -> 进入人工校验队列
+```
