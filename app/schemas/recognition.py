@@ -65,7 +65,9 @@ class RecognitionResult(BaseModel):
     accountId: str | None = None
     douyinId: str | None = None
     wechatChannelId: str | None = None
+    pageType: str | None = None  # ACCOUNT_OVERVIEW / CONTENT_PAGE / DATA_OVERVIEW / DATA_CHART / FLOW_ANALYSIS / UNKNOWN
     contentType: str | None = None  # IMAGE_TEXT / VIDEO / ACCOUNT_OVERVIEW / UNKNOWN
+    nextAction: str | None = None  # WAIT_ACCOUNT_CONFIRM / WAIT_CONTENT_CONFIRM / WAIT_METRIC_CONFIRM / NEED_MANUAL_REVIEW
     contentTitle: str | None = None
     candidateTitles: list[str] = Field(default_factory=list)
     metrics: Metrics = Field(default_factory=Metrics)
@@ -80,7 +82,9 @@ class RecognitionResponse(BaseModel):
     engine: str
     platform: str
     scene: str
+    pageType: str | None = None
     contentType: str | None = None
+    nextAction: str | None = None
     rawText: str
     result: RecognitionResult
     warnings: list[str] = Field(default_factory=list)
