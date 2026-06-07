@@ -75,12 +75,16 @@ class RecognitionService:
                 warnings.append("OCR 未识别出任何文字，请检查图片清晰度、裁剪范围、是否为截图/拍屏、是否存在强反光或压缩。")
             if result.contentType in {"UNKNOWN", None} and normalized_scene != "ACCOUNT_OVERVIEW":
                 warnings.append("未能明确判断内容类型，建议 OA 后台人工选择图文或视频后重新解析/校验。")
+            if result.pageType == "UNKNOWN" or result.nextAction == "NEED_MANUAL_REVIEW":
+                warnings.append("未能明确判断截图页面类型，请人工确认后再进入下一步。")
             return RecognitionResponse(
                 requestId=request_id,
                 engine=ocr.engine,
                 platform=platform,
                 scene=normalized_scene,
+                pageType=result.pageType,
                 contentType=result.contentType,
+                nextAction=result.nextAction,
                 rawText=ocr.raw_text,
                 result=result,
                 warnings=warnings,
