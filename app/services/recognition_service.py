@@ -9,13 +9,13 @@ from app.core.config import settings
 from app.core.errors import BadRequestError
 from app.schemas.recognition import RecognitionResponse
 from app.services.ocr_engine import OcrEngine
-from app.services.social_metrics_extractor import SocialMetricsExtractor
+from app.services.douyin_metric_patch import PatchedSocialMetricsExtractor
 
 
 class RecognitionService:
     def __init__(self) -> None:
         self.ocr = OcrEngine()
-        self.extractor = SocialMetricsExtractor()
+        self.extractor = PatchedSocialMetricsExtractor()
         self.temp_dir = Path("/tmp/tree-education-datacollecting")
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
