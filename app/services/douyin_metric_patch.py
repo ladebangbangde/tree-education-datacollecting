@@ -1,8 +1,46 @@
 from app.services.social_metrics_extractor import SocialMetricsExtractor
-from app.schemas.recognition import VideoStats
+from app.schemas.recognition import ImageTextStats, VideoStats
 
 
 class PatchedSocialMetricsExtractor(SocialMetricsExtractor):
+    def _patch_douyin_image_text(self, clean: str, lines: list[str], stats: ImageTextStats) -> None:
+        # 数据页1：播放量 / 点赞量 / 评论量
+        primary = self._values_after_label_sequence(lines, ["播放量", "点赞量", "评论量"], 3)
+        if len(primary) >= 1:
+            stats.viewCount = self._parse_number(primary[0])
+        if len(primary) >= 2:
+            stats.likeCount = self._parse_number(primary[1])
+        if len(primary) >= 3:
+            stats.commentCount = self._parse_number(primary[2])
+
+        # 数据页1：分享量 / 收藏量 / 划走率
+        secondary = self._values_after_label_sequence(lines, ["分享量", "收藏量", "划走率"], 3)
+        if len(secondary) >= 1:
+            stats.shareCount = self._parse_number(secondary[0]) or stats.shareCount
+        if len(secondary) >= 2 and not self._looks_percent(secondary[1]):
+            stats.favoriteCount = self._parse_number(secondary[1]) or stats.favoriteCount
+        if len(secondary) >= 3 and self._looks_percent(secondary[2]):
+            stats.slideAwayRate = secondary[2]
+
+        # 数据页3：封面点击率 / 文案展开率 / 划走率 -> 0% / 7.19% / 45.01%
+        first_row = self._values_after_label_sequence(lines, ["封面点击率", "文案展开率", "划走率"], 3)
+        if len(first_row) >= 3:
+            if self._looks_percent(first_row[0]):
+                stats.coverClickRate = first_row[0]
+            if self._looks_percent(first_row[1]):
+                stats.copyExpandRate = first_row[1]
+            if self._looks_percent(first_row[2]):
+                stats.slideAwayRate = first_row[2]
+
+        # 数据页3：平均浏览图片数 / 文案完读率 / 评论进入率 -> 2.5 / 71.01% / 8.13%
+        second_row = self._values_after_label_sequence(lines, ["平均浏览图片数", "文案完读率", "评论进入率"], 3)
+        if len(second_row) >= 3:
+            stats.imageCount = self._parse_number(second_row[0]) or stats.imageCount
+            if self._looks_percent(second_row[1]):
+                stats.copyFinishRate = second_row[1]
+            if self._looks_percent(second_row[2]):
+                stats.commentEnterRate = second_row[2]
+
     def _patch_douyin_video(self, clean: str, lines: list[str], stats: VideoStats) -> None:
         # 数据页1：评论量 / 点赞量 / 播放量 -> 4 / 723 / 7
         primary = self._values_after_label_sequence(lines, ["评论量", "点赞量", "播放量"], 3)
