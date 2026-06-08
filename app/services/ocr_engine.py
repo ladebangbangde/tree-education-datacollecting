@@ -28,7 +28,9 @@ class OcrEngine:
         except Exception as exc:
             raise RuntimeError("PaddleOCR is not installed. Use docker-compose.paddle.yml or OCR_ENGINE=mock") from exc
 
-        ocr = PaddleOCR(use_angle_cls=True, lang="ch")
+        # 拍屏/手机截图中的指标数字很小，默认 det_limit_side_len=960 会压缩长边，容易漏掉涨粉量这种单个数字。
+        # 提高检测长边上限，优先保证运营数据页的小数字被识别出来。
+        ocr = PaddleOCR(use_angle_cls=True, lang="ch", det_limit_side_len=1600, det_limit_type="max")
         result = ocr.ocr(str(image_path), cls=True)
         lines: list[str] = []
         for page in result or []:
